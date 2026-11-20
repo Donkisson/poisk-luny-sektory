@@ -29,6 +29,7 @@
   <section id="coordinator-tools" class="coordinator-tools" hidden aria-label="Управление расписанием">
     <div><strong>Редактор координатора</strong><p id="editor-message" role="status">Контакты хранятся в этом браузере.</p></div>
     <div class="tool-buttons">
+      <button type="button" id="cancel-move" hidden>Отменить перенос</button>
       <button type="button" id="export-sheet">Скопировать для Google Таблицы</button>
       <button type="button" id="export-csv">Скачать schedule.csv</button>
       <button type="button" id="export-backup">Сохранить личную копию</button>
@@ -49,17 +50,11 @@
       <div id="map" role="region" aria-label="Карта Минска с участками поиска"></div>
       <p class="map-note" id="map-note" role="status">Масштаб меняется кнопками на карте или двумя пальцами.</p>
     </div>
-    <aside class="side" aria-label="Сведения об участках">
-      <div class="side-inner">
-        <div id="detail" tabindex="-1"></div>
-        <div class="sector-search">
-          <label for="sector-query">Найти по номеру участка</label>
-          <input type="search" spellcheck="false" id="sector-query" placeholder="Например, 246">
-          <div id="sector-list" class="sector-list"></div>
-        </div>
-      </div>
-    </aside>
+
   </section>
+  <dialog id="sector-dialog" class="sector-dialog" aria-labelledby="sector-dialog-title">
+    <div id="detail"></div>
+  </dialog>
 </main>
 <noscript><p class="wrap">Включи JavaScript, чтобы открылась карта и расписание.</p></noscript>
 </body>

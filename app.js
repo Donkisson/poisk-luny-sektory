@@ -2,19 +2,20 @@
   'use strict';
 
   const config = window.SEARCH_CONFIG;
-  const { statuses, normalizeSector, telegramUsername, minskTime, awaitingReport, shiftWindow, readSchedule, serialize, sheetCell, compare, clean, sectorStatus, hasOverlap } = window.SearchModel;
+  const { statuses, normalizeSector, telegramUsername, minskTime, crossesMidnight, awaitingReport, shiftWindow, readSchedule, serialize, sheetCell, compare, clean, sectorStatus, hasOverlap } = window.SearchModel;
   const { sectors, boundary } = window.MINSK_SECTORS;
   const zones = new Map(sectors.map(([id, center, vertices]) => [normalizeSector(id), { center, vertices }]));
   const root = document.documentElement;
   const coordinator = root.dataset.mode === 'coordinator';
   const detail = document.getElementById('detail');
-  const search = document.getElementById('sector-query');
-  const list = document.getElementById('sector-list');
+  const sectorDialog = document.getElementById('sector-dialog');
+  const cancelMoveControl = document.getElementById('cancel-move');
   const syncStatus = document.getElementById('sync-status');
   const editorMessage = document.getElementById('editor-message');
   const mapNote = document.getElementById('map-note');
   const name = 'luna-sectors:' + config.date;
   const privateStore = name + ':coordinator';
+  const overnightHint = 'Если время «До» раньше времени «С», окончание будет на следующий день.';
   let storeReady = true;
   let shifts = [];
   let retiredShifts = [];
@@ -129,7 +130,6 @@
       updateIndexes();
       closeSectorTip();
       paintPolygons();
-      renderList();
       renderDetail();
     }
   }
@@ -192,7 +192,6 @@
         closeSectorTip();
         for (const item of holder.children) item.setAttribute('aria-pressed', item === control ? 'true' : 'false');
         paintPolygons();
-        renderList();
       });
       if (id !== 'all') {
         const dot = node('span', 'dot');
@@ -229,7 +228,7 @@
   function paintLabels() {
     if (!labelsLayer) return;
     labelsLayer.clearLayers();
-    if (map.getZoom() < 13) return;
+    if (map.getZoom() < 12.5) return;
     const bounds = map.getBounds();
     for (const [id, zone] of zones) {
       if (!(matches(id) || id === selected)) continue;
@@ -247,30 +246,11 @@
         keyboard: false, interactive: false,
         icon: L.divIcon({
           className: 'map-label', html: label,
-          iconSize: completed ? [126, 48] : [48, 18],
-          iconAnchor: completed ? [63, 24] : [24, 9]
+          iconSize: completed ? [168, 56] : [48, 18],
+          iconAnchor: completed ? [84, 28] : [24, 9]
         })
       }).addTo(labelsLayer);
     }
-  }
-
-  function renderList() {
-    list.replaceChildren();
-    const query = search.value.trim().toUpperCase().replace(/^[MМ][ -]?/, '');
-    if (!query && filter === 'all') {
-      list.append(node('p', 'secondary', 'Всего участков: ' + zones.size + '. Можно выбрать любой на карте.'));
-      return;
-    }
-    const exact = normalizeSector(query);
-    const results = [...zones.keys()].filter(id => matches(id) && (!query || id === exact || id.includes(query)));
-    results.sort((a, b) => Number(b === exact) - Number(a === exact));
-    if (!results.length) list.append(node('p', 'secondary', query ? 'Участок не найден. Проверь номер или включи фильтр «Все».' : 'Участков с таким статусом пока нет.'));
-    for (const id of results.slice(0, 24)) {
-      const row = button('', () => select(id, { zoom: true, focus: true }), 'zone-row');
-      row.append(node('span', 'zone-id', id), node('span', '', statuses[statusOf(id)].label));
-      list.append(row);
-    }
-    if (results.length > 24) list.append(node('p', 'secondary', 'Показано 24 из ' + results.length + '. Уточни номер, чтобы сузить список.'));
   }
 
   function updateRoute() {
@@ -279,10 +259,25 @@
     try { history.replaceState(null, '', url); } catch {}
   }
 
+  function setMove(id) {
+    moving = id;
+    cancelMoveControl.hidden = !id;
+  }
+
+  function cancelMove() {
+    setMove('');
+    editorMessage.textContent = 'Перенос отменён.';
+    if (selected) select(selected);
+  }
+
   function select(id, options = {}) {
     if (!zones.has(id)) return;
     closeSectorTip();
-    if (coordinator && moving && id !== selected) {
+    if (coordinator && moving) {
+      if (id === selected) {
+        cancelMove();
+        return;
+      }
       const shift = shifts.find(row => row.id === moving);
       if (shift) {
         const candidate = { ...shift, sector: id };
@@ -291,8 +286,10 @@
           return;
         }
         shifts = shifts.map(row => row.id === moving ? candidate : row);
-        moving = '';
+        setMove('');
         storeShifts('Назначение перенесено в ' + id + '.');
+      } else {
+        setMove('');
       }
     }
     selected = id;
@@ -304,9 +301,9 @@
       const [lon, lat] = zones.get(id).center;
       map.setView([lat, lon], Math.max(map.getZoom(), 14), { animate: false });
     }
-    if (options.focus) {
-      detail.focus({ preventScroll: true });
-      if (matchMedia('(max-width:800px)').matches) detail.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    if (!sectorDialog.open) {
+      sectorDialog.showModal();
+      sectorDialog.scrollTop = 0;
     }
   }
 
@@ -345,7 +342,7 @@
     const submit = node('button', 'primary', topic ? 'Скопировать и открыть тему' : 'Заявка в Telegram');
     submit.type = 'submit';
     action.append(submit, button('Скопировать заявку', () => send(true)));
-    form.append(times, action, response);
+    form.append(times, node('p', 'hint', overnightHint), action, response);
     if (topic) {
       const link = external('Открыть тему поиска', topic);
       link.className = 'secondary';
@@ -355,16 +352,17 @@
     async function send(copy) {
       if (!form.reportValidity()) return;
       const fields = new FormData(form);
-      const start = fields.get('start'), end = fields.get('end');
-      if (!(start < end)) {
-        response.textContent = 'Время окончания должно быть позже начала.';
+      const slot = clean({ sector: id, start: fields.get('start'), end: fields.get('end'), status: 'booked' });
+      if (!slot) {
+        response.textContent = 'Выбери разное время начала и окончания.';
         return;
       }
-      if (schedule.some(row => start < row.end && row.start < end && ['booked','searching'].includes(row.status))) {
+      const { start, end } = slot;
+      if (hasOverlap(schedule.filter(row => ['booked', 'searching'].includes(row.status)), slot)) {
         response.textContent = 'На это время участок уже занят. Выбери другое время или соседний участок.';
         return;
       }
-      const message = 'Поиск Луны · ' + dateTitle + '\nУчасток ' + id + '\nМогу искать с ' + start + ' до ' + end + ' (время Минска).\nПожалуйста, подтверди назначение.';
+      const message = 'Поиск Луны · ' + dateTitle + '\nУчасток ' + id + '\nМогу искать с ' + start + ' до ' + end + (crossesMidnight(start, end) ? ' следующего дня' : '') + ' (время Минска).\nПожалуйста, подтверди назначение.';
       if (copy) {
         const ok = await copyText(message);
         response.textContent = ok ? 'Заявка скопирована. Отправь её координатору.' : 'Скопируй текст заявки ниже.';
@@ -399,19 +397,13 @@
     const oldForm = document.getElementById('volunteer-form');
     const previous = oldForm?.dataset.sector === selected ? new FormData(oldForm) : null;
     detail.replaceChildren();
-    if (!selected) {
-      detail.append(node('h2', '', 'Выбери участок'),
-        node('p', 'secondary', coordinator ? 'Нажми на соту или найди её по номеру. Здесь можно назначить группу и записать результат.' :
-        'Нажми на соту или найди её по номеру. Координатор подтвердит заявку в Telegram.'));
-      return;
-    }
+    if (!selected) return;
     const title = node('div', 'zone-title');
-    const close = button('×', () => {
-      selected = ''; editing = ''; moving = '';
-      updateRoute(); paintPolygons(); renderDetail();
-    });
+    const heading = node('h2', 'zone-id', 'Участок ' + selected);
+    heading.id = 'sector-dialog-title';
+    const close = button('×', () => sectorDialog.close());
     close.setAttribute('aria-label', 'Закрыть сведения об участке');
-    title.append(node('h2', 'zone-id', 'Участок ' + selected), close);
+    title.append(heading, close);
     const [lon, lat] = zones.get(selected).center;
     const yandex = new URL('https://yandex.by/maps/');
     yandex.searchParams.set('ll', lon + ',' + lat);
@@ -453,15 +445,15 @@
     if (entry.note) li.append(node('p', 'secondary private-note', entry.note));
     const actions = node('div', 'form-buttons');
     actions.append(button('Править', () => { editing = entry.id; renderDetail(); document.getElementById('edit-form')?.scrollIntoView({ block: 'nearest' }); }));
-    actions.append(button(moving === entry.id ? 'Отмена' : 'Перенести', () => {
-      moving = moving === entry.id ? '' : entry.id;
-      editorMessage.textContent = moving ? 'Нажми на новый участок на карте, чтобы перенести назначение.' : 'Перенос отменён.';
-      renderDetail();
+    actions.append(button('Перенести', () => {
+      setMove(entry.id);
+      editorMessage.textContent = 'Нажми на новый участок на карте, чтобы перенести назначение.';
+      sectorDialog.close();
     }));
     actions.append(button('Снять', () => {
-      if (!confirm('Снять назначение с ' + entry.sector + ' на ' + entry.start + '–' + entry.end + '?')) return;
+      if (!confirm('Снять назначение с ' + entry.sector + ' на ' + shiftWindow({ start: entry.start, end: entry.end }) + '?')) return;
       shifts = shifts.filter(row => row.id !== entry.id);
-      moving = ''; editing = '';
+      setMove(''); editing = '';
       storeShifts('Назначение снято.');
     }));
     li.append(actions);
@@ -486,7 +478,7 @@
     const times = node('div', 'time-form');
     timeInput(times, 'С', 'start', old?.start);
     timeInput(times, 'До', 'end', old?.end);
-    form.append(times);
+    form.append(times, node('p', 'hint', overnightHint));
     const dropdown = field(form, 'Статус', 'status', 'select');
     for (const key of ['booked','searching','done']) {
       const option = node('option', '', statuses[key].label);
@@ -531,9 +523,9 @@
       const id = old?.id || (globalThis.crypto?.randomUUID?.() ?? Date.now() + '-' + Math.random());
       const fields = Object.fromEntries(new FormData(form));
       const slot = clean({ ...fields, id, sector: selected }, true);
-      if (!slot) { result.textContent = 'Проверь время начала и окончания.'; return; }
+      if (!slot) { result.textContent = 'Выбери разное время начала и окончания.'; return; }
       if ((fields.actual_start || fields.actual_end) && !slot.actual_start) {
-        result.textContent = 'Укажи фактическое время начала и окончания обхода.';
+        result.textContent = 'Укажи оба времени обхода. Начало и окончание должны различаться.';
         return;
       }
       if (username.value.trim() && !slot.username) {
@@ -558,7 +550,6 @@
     editorMessage.textContent = storeReady ? message : 'Браузер не сохранил изменения. Скачай личную копию перед закрытием.';
     updateIndexes();
     paintPolygons();
-    renderList();
     renderDetail();
   }
 
@@ -652,7 +643,7 @@
         const saved = getPrivateEntries(JSON.parse(await file.text()));
         if (!saved) throw new Error('Файл относится к другой дате или содержит ошибки.');
         if ((shifts.length || retiredShifts.length) && !confirm('Заменить текущие назначения записями из личной копии?')) return;
-        shifts = saved.entries; retiredShifts = saved.retired; editing = ''; moving = '';
+        shifts = saved.entries; retiredShifts = saved.retired; editing = ''; setMove('');
         storeShifts('Личная копия загружена.');
       } catch (error) { editorMessage.textContent = 'Копия не загружена. ' + error.message; }
     });
@@ -703,7 +694,7 @@
 
   function startMap() {
     if (!window.L) {
-      mapNote.textContent = 'Карта недоступна. Можно найти участок по номеру.';
+      mapNote.textContent = 'Карта недоступна. Попробуй обновить страницу.';
       return;
     }
     const westView = L.latLngBounds([[53.883,27.407], [53.945,27.53]]);
@@ -718,7 +709,7 @@
     for (const [id, zone] of zones) {
       const vertices = zone.vertices.map(([lon,lat]) => [lat,lon]);
       const layer = L.polygon(vertices, styleFor(id)).addTo(polygonLayer);
-      layer.on('click', () => select(id, { focus: true }));
+      layer.on('click', () => select(id));
       layer.on('mouseover', event => showSectorTip(id, event.latlng));
       layer.on('mouseout', scheduleSectorTipClose);
       polygons.set(id, layer);
@@ -737,6 +728,10 @@
       if (event.key === 'Escape') {
         map.scrollWheelZoom.disable();
         closeSectorTip();
+        if (moving) {
+          event.preventDefault();
+          cancelMove();
+        }
       }
     });
     addBasemap();
@@ -816,7 +811,7 @@
       });
       let loaded = 0;
       const failure = setTimeout(() => {
-        if (!loaded) mapNote.textContent = 'Подложка недоступна. Соты, список и ссылки на Яндекс Карты работают.';
+        if (!loaded) mapNote.textContent = 'Подложка недоступна. Соты и ссылки на Яндекс Карты работают.';
       }, 7000);
       raster.on('tileload', () => {
         loaded++;
@@ -830,13 +825,20 @@
   if (coordinator) setupCoordinator();
   makeFilters();
   startMap();
-  renderList();
   renderDetail();
-  search.addEventListener('input', renderList);
-  search.addEventListener('keydown', event => {
-    const id = normalizeSector(search.value);
-    if (event.key === 'Enter' && zones.has(id)) select(id, { zoom: true, focus: true });
+  sectorDialog.addEventListener('close', () => {
+    if (sectorDialog.open || moving) return;
+    selected = '';
+    editing = '';
+    updateRoute();
+    paintPolygons();
   });
+  sectorDialog.addEventListener('click', event => {
+    if (event.target !== sectorDialog) return;
+    const { left, top, right, bottom } = sectorDialog.getBoundingClientRect();
+    if (event.clientX < left || event.clientX > right || event.clientY < top || event.clientY > bottom) sectorDialog.close();
+  });
+  cancelMoveControl.addEventListener('click', cancelMove);
   document.getElementById('refresh').addEventListener('click', refresh);
   let elapsedShifts = 0;
   setInterval(() => {

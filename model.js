@@ -72,13 +72,27 @@
     return fields.year + '-' + fields.month + '-' + fields.day + 'T' + fields.hour + ':' + fields.minute;
   }
 
+  function crossesMidnight(start, end) {
+    return minutes(end) < minutes(start);
+  }
+
+  function validRange(start, end) {
+    return Number.isFinite(start) && Number.isFinite(end) && start !== end;
+  }
+
   function awaitingReport(entry, date, clock) {
-    return (entry.status === 'booked' || entry.status === 'searching') && clock >= date + 'T' + entry.end;
+    if (entry.status !== 'booked' && entry.status !== 'searching') return false;
+    if (!crossesMidnight(entry.start, entry.end)) return clock >= date + 'T' + entry.end;
+    const tomorrow = new Date(date + 'T00:00:00Z');
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    return clock >= tomorrow.toISOString().slice(0, 10) + 'T' + entry.end;
   }
 
   function shiftWindow(entry) {
-    if (entry.status === 'done' && entry.actual_start && entry.actual_end) return entry.actual_start + '–' + entry.actual_end;
-    return entry.start + '–' + entry.end;
+    const actual = entry.status === 'done' && entry.actual_start && entry.actual_end;
+    const start = actual ? entry.actual_start : entry.start;
+    const end = actual ? entry.actual_end : entry.end;
+    return start + '–' + end + (crossesMidnight(start, end) ? ' (+1 день)' : '');
   }
 
   function clean(row, includePrivate = false) {
@@ -86,12 +100,12 @@
     const sector = normalizeSector(row.sector);
     const start = minutes(row.start), end = minutes(row.end);
     const status = String(row.status ?? '').trim();
-    if (!sector || !(start < end) || !Object.hasOwn(statuses, status) || ['free', 'unknown'].includes(status) ) return null;
+    if (!sector || !validRange(start, end) || !Object.hasOwn(statuses, status) || ['free', 'unknown'].includes(status)) return null;
     const shift = { sector, start: formatTime(start), end: formatTime(end), status };
     const username = telegramUsername(row.username);
     if (username) shift.username = username;
     const actualStart = minutes(row.actual_start), actualEnd = minutes(row.actual_end);
-    if (status === 'done' && actualStart < actualEnd) {
+    if (status === 'done' && validRange(actualStart, actualEnd)) {
       shift.actual_start = formatTime(actualStart);
       shift.actual_end = formatTime(actualEnd);
     }
@@ -142,11 +156,13 @@
   }
 
   function hasOverlap(entries, slot) {
-    return entries.some(entry => entry.sector === slot.sector && entry.id !== slot.id &&
-      entry.start < slot.end && slot.start < entry.end);
+    const endMinute = entry => minutes(entry.end) + (crossesMidnight(entry.start, entry.end) ? 24 * 60 : 0);
+    const slotStart = minutes(slot.start), slotEnd = endMinute(slot);
+    return entries.some(entry => entry.sector === slot.sector && (!slot.id || entry.id !== slot.id) &&
+      minutes(entry.start) < slotEnd && slotStart < endMinute(entry));
   }
 
-  const model = { statuses, minutes, formatTime, normalizeSector, telegramUsername, minskTime, awaitingReport, shiftWindow, readSchedule, serialize, sheetCell, compare, clean, sectorStatus, hasOverlap };
+  const model = { statuses, minutes, formatTime, normalizeSector, telegramUsername, minskTime, crossesMidnight, awaitingReport, shiftWindow, readSchedule, serialize, sheetCell, compare, clean, sectorStatus, hasOverlap };
   if (typeof module !== 'undefined' && module.exports) module.exports = model;
   else root.SearchModel = model;
 })(globalThis);
